@@ -1,0 +1,30 @@
+name: Build Windows EXE
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Скачать код из репозитория
+        uses: actions/checkout@v4
+
+      - name: Установить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Установить библиотеки
+        run: pip install PyMuPDF Pillow pyinstaller
+
+      - name: Собрать .exe
+        run: pyinstaller --onefile --windowed --name "PDF Просмотрщик" pdf_viewer.py
+
+      - name: Опубликовать готовый .exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDF-Prosmotrshik-Windows
+          path: dist/PDF Просмотрщик.exe
