@@ -40,6 +40,12 @@ class PdfViewerApp:
         self.zoom = 1.3
         self.photo_image = None  # держим ссылку, чтобы Tkinter не удалил картинку
 
+        # Для выделения текста мышкой (как в Word)
+        self.page_words = []           # список слов текущей страницы: (x0, y0, x1, y1, текст)
+        self.selection_start_idx = None
+        self.selection_end_idx = None
+        self.selecting = False
+
         self._build_toolbar()
         self._build_canvas()
         self._bind_shortcuts()
@@ -63,6 +69,7 @@ class PdfViewerApp:
         tk.Button(toolbar, text="Вперёд ▶", command=self.next_page, **btn_style).pack(side=tk.LEFT, padx=4, pady=4)
         tk.Button(toolbar, text="−", command=self.zoom_out, **btn_style).pack(side=tk.LEFT, padx=4, pady=4)
         tk.Button(toolbar, text="+", command=self.zoom_in, **btn_style).pack(side=tk.LEFT, padx=4, pady=4)
+        tk.Button(toolbar, text="Копировать", command=self.copy_selection, **btn_style).pack(side=tk.LEFT, padx=4, pady=4)
 
         self.page_label = tk.Label(toolbar, text="Файл не открыт", bg="#3c3c3c", fg="white", font=("Segoe UI", 10))
         self.page_label.pack(side=tk.LEFT, padx=16)
@@ -88,7 +95,11 @@ class PdfViewerApp:
         self.root.bind("<Control-o>", lambda e: self.choose_file())
         self.root.bind("<Control-plus>", lambda e: self.zoom_in())
         self.root.bind("<Control-minus>", lambda e: self.zoom_out())
+        self.root.bind("<Control-c>", lambda e: self.copy_selection())
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<ButtonPress-1>", self._on_selection_start)
+        self.canvas.bind("<B1-Motion>", self._on_selection_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_selection_end)
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -127,6 +138,16 @@ class PdfViewerApp:
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo_image)
         self.canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
 
+        # Извлекаем слова страницы с координатами (для выделения текста мышкой).
+        # get_text("words") возвращает слова уже в порядке чтения (блок, строка, слово).
+        raw_words = page.get_text("words")
+        self.page_words = [
+            (w[0] * self.zoom, w[1] * self.zoom, w[2] * self.zoom, w[3] * self.zoom, w[4])
+            for w in raw_words
+        ]
+        self.selection_start_idx = None
+        self.selection_end_idx = None
+
         self.page_label.config(
             text=f"Страница {self.current_page + 1} из {len(self.doc)}   ·   Масштаб {int(self.zoom * 100)}%"
         )
@@ -150,6 +171,80 @@ class PdfViewerApp:
         if self.doc:
             self.zoom = max(self.zoom - 0.2, 0.4)
             self.render_page()
+
+    # --- Выделение текста мышкой (как в Word) ---
+
+    def _find_word_index_at(self, x, y):
+        """Находит индекс ближайшего слова к точке (x, y) в координатах холста."""
+        if not self.page_words:
+            return None
+        best_idx = 0
+        best_dist = None
+        for i, (x0, y0, x1, y1, _) in enumerate(self.page_words):
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return i
+            dx = max(x0 - x, 0, x - x1)
+            dy = max(y0 - y, 0, y - y1)
+            dist = dx * dx + dy * dy
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        return best_idx
+
+    def _on_selection_start(self, event):
+        if not self.doc or not self.page_words:
+            return
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        idx = self._find_word_index_at(x, y)
+        self.selection_start_idx = idx
+        self.selection_end_idx = idx
+        self.selecting = True
+        self._draw_selection_highlights()
+
+    def _on_selection_drag(self, event):
+        if not self.selecting or not self.doc or not self.page_words:
+            return
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        idx = self._find_word_index_at(x, y)
+        self.selection_end_idx = idx
+        self._draw_selection_highlights()
+
+    def _on_selection_end(self, event):
+        self.selecting = False
+
+    def _draw_selection_highlights(self):
+        self.canvas.delete("selection_highlight")
+        if self.selection_start_idx is None or self.selection_end_idx is None:
+            return
+        lo = min(self.selection_start_idx, self.selection_end_idx)
+        hi = max(self.selection_start_idx, self.selection_end_idx)
+        for i in range(lo, hi + 1):
+            x0, y0, x1, y1, _ = self.page_words[i]
+            self.canvas.create_rectangle(
+                x0, y0, x1, y1,
+                fill="#4A90D9", outline="",
+                stipple="gray50",
+                tags="selection_highlight"
+            )
+
+    def copy_selection(self):
+        if self.selection_start_idx is None or self.selection_end_idx is None:
+            return
+        lo = min(self.selection_start_idx, self.selection_end_idx)
+        hi = max(self.selection_start_idx, self.selection_end_idx)
+        text = " ".join(w[4] for w in self.page_words[lo:hi + 1])
+        if not text:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update()  # чтобы буфер обмена сохранился, даже если окно потеряет фокус
+
+        # Кратко показываем подтверждение в статусной строке
+        old_text = self.page_label.cget("text")
+        self.page_label.config(text="Скопировано в буфер обмена ✓")
+        self.root.after(1200, lambda: self.page_label.config(text=old_text))
 
 
 if __name__ == "__main__":
